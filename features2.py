@@ -190,7 +190,7 @@ def extract_features(row):
     - whisking onset Vm change
     - touch onset Vm change
     """
-
+    cell_id = row["Cell_ID"]
     vm = np.array(row["Sweep_MembranePotential"])
     fs = float(row["Sweep_MembranePotential_SamplingRate"])
 
@@ -223,6 +223,7 @@ def extract_features(row):
     touch_vm_change = compute_touch_features(vm, fs, contact_times)
 
     return pd.Series({
+        "Cell_ID": cell_id,
         "mean_vm": mean_vm,
         "std_vm": std_vm,
         "skew_vm": skew_vm,
@@ -258,6 +259,105 @@ def build_feature_dataset(df):
     features_df["cell_depth"] = df["Cell_Depth"]
 
     return features_df
+
+
+
+
+import numpy as np
+import pandas as pd
+from scipy.signal import welch
+
+def extract_event_locked_features(
+    df,
+    vm_col="vm_avg",
+    wp_col="wp_avg",
+    ap_col="ap_avg",
+    fs_vm=20000,
+    fs_wp=500,
+    fs_ap=20000
+):
+    """
+    Extract 3 meaningful features from each of:
+    - vm_avg: membrane potential (event-triggered)
+    - wp_avg: whisker angle (event-triggered)
+    - ap_avg: firing probability / rate (event-triggered)
+
+    Assumes whisking onset is at the midpoint of the vectors.
+    """
+
+    features = []
+
+    for _, row in df.iterrows():
+
+        vm = np.asarray(row[vm_col])
+        wp = np.asarray(row[wp_col])
+        ap = np.asarray(row[ap_col])
+
+        # Split pre / post (event at midpoint)
+        mid_vm = len(vm) // 2
+        mid_wp = len(wp) // 2
+        mid_ap = len(ap) // 2
+
+        vm_post = vm[mid_vm:]
+        wp_post = wp[mid_wp:]
+        ap_post = ap[mid_ap:]
+
+        # -------- VM FEATURES --------
+        f_vm, P_vm = welch(vm_post, fs=fs_vm, nperseg=len(vm_post))
+        P_vm = P_vm + 1e-12
+        P_vm /= P_vm.sum()
+
+        spectral_entropy_vm = -np.sum(P_vm * np.log(P_vm))
+
+        lf_vm = P_vm[(f_vm >= 1) & (f_vm <= 10)].sum()
+        hf_vm = P_vm[(f_vm >= 20) & (f_vm <= 80)].sum()
+        lf_hf_ratio_vm = lf_vm / (hf_vm + 1e-12)
+
+        t_vm = np.linspace(0, 1, len(vm_post))
+        temporal_centroid_vm = np.sum(t_vm * np.abs(vm_post)) / np.sum(np.abs(vm_post))
+
+        # -------- WHISKER FEATURES --------
+        f_wp, P_wp = welch(wp_post, fs=fs_wp, nperseg=len(wp_post))
+        P_wp = P_wp + 1e-12
+        P_wp /= P_wp.sum()
+
+        spectral_entropy_wp = -np.sum(P_wp * np.log(P_wp))
+
+        dominant_freq_wp = f_wp[np.argmax(P_wp)]
+
+        whisk_motion_energy = np.sum(wp_post**2)
+
+        # -------- FIRING FEATURES --------
+        f_ap, P_ap = welch(ap_post, fs=fs_ap, nperseg=len(ap_post))
+        P_ap = P_ap + 1e-12
+        P_ap /= P_ap.sum()
+
+        spectral_entropy_ap = -np.sum(P_ap * np.log(P_ap))
+
+        mean_ap_post = ap_post.mean()
+
+        # Vm–AP coupling
+        if np.std(vm_post) > 0 and np.std(ap_post) > 0:
+            vm_ap_coupling = np.corrcoef(vm_post, ap_post)[0, 1]
+        else:
+            vm_ap_coupling = 0.0
+
+        features.append({
+            "spectral_entropy_vm_post": spectral_entropy_vm,
+            "lf_hf_ratio_vm_post": lf_hf_ratio_vm,
+            "temporal_centroid_vm_post": temporal_centroid_vm,
+
+            "spectral_entropy_wp_post": spectral_entropy_wp,
+            "dominant_freq_wp_post": dominant_freq_wp,
+            "whisk_motion_energy_post": whisk_motion_energy,
+
+            "spectral_entropy_ap_post": spectral_entropy_ap,
+            "mean_ap_post": mean_ap_post,
+            "vm_ap_coupling_post": vm_ap_coupling
+        })
+
+    return pd.DataFrame(features, index=df.index)
+
 
 
 # Example usage (uncomment in your script or notebook):
